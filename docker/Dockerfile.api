@@ -1,0 +1,43 @@
+# Build stage
+FROM mcr.microsoft.com/dotnet/sdk:7.0 AS build
+WORKDIR /src
+
+# Copy project files
+COPY src/MarketBrief.Core/MarketBrief.Core.csproj src/MarketBrief.Core/
+COPY src/MarketBrief.Infrastructure/MarketBrief.Infrastructure.csproj src/MarketBrief.Infrastructure/
+COPY src/MarketBrief.Api/MarketBrief.Api.csproj src/MarketBrief.Api/
+
+# Restore dependencies
+RUN dotnet restore src/MarketBrief.Api/MarketBrief.Api.csproj
+
+# Copy source code
+COPY src/MarketBrief.Core/ src/MarketBrief.Core/
+COPY src/MarketBrief.Infrastructure/ src/MarketBrief.Infrastructure/
+COPY src/MarketBrief.Api/ src/MarketBrief.Api/
+
+# Build and publish
+WORKDIR /src/src/MarketBrief.Api
+RUN dotnet publish -c Release -o /app/publish
+
+# Runtime stage
+FROM mcr.microsoft.com/dotnet/aspnet:7.0 AS runtime
+WORKDIR /app
+
+# Install libgdiplus for QuestPDF
+RUN apt-get update && apt-get install -y \
+    libgdiplus \
+    libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create directory for PDFs
+RUN mkdir -p /app/pdfs
+
+COPY --from=build /app/publish .
+
+# Set environment variables
+ENV ASPNETCORE_URLS=http://+:5000
+ENV DOTNET_RUNNING_IN_CONTAINER=true
+
+EXPOSE 5000
+
+ENTRYPOINT ["dotnet", "MarketBrief.Api.dll"]
