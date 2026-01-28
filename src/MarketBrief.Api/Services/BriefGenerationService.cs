@@ -175,7 +175,7 @@ public class BriefGenerationService : IBriefGenerationService
             if (_configuration.GetValue<bool>("Email:Enabled", false) && _emailService.IsConfigured)
             {
                 _logger.LogInformation("Sending email notification for brief {BriefId}", brief.Id);
-                var pdfBytes = _pdfGenerator.GeneratePdf(brief, marketDataList);
+                var pdfBytes = _pdfGenerator.GeneratePdf(brief, marketDataList, rankedNews);
                 await _emailService.SendBriefNotificationAsync(brief, pdfBytes, cancellationToken);
             }
 

@@ -244,7 +244,7 @@ public class QuestPdfGenerator : IPdfGenerator
                         });
                     }
 
-                    // Market-Moving News (top 5 for PDF)
+                    // Market-Moving News
                     if (newsList != null && newsList.Any())
                     {
                         column.Item().Column(section =>
@@ -258,7 +258,7 @@ public class QuestPdfGenerator : IPdfGenerator
                             {
                                 newsColumn.Spacing(10);
 
-                                foreach (var story in newsList.Take(5))
+                                foreach (var story in newsList)
                                 {
                                     newsColumn.Item().BorderLeft(3).BorderColor(Colors.Blue.Darken2).PaddingLeft(8).Column(storyCol =>
                                     {
