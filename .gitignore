@@ -65,3 +65,5 @@ pdfs/
 # Logs
 logs/
 *.log
+src/MarketBrief.Api/appsettings.json
+src/MarketBrief.Api/appsettings.Development.json
