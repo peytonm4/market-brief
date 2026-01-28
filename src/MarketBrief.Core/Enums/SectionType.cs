@@ -10,5 +10,6 @@ public enum SectionType
     MarketOutlook = 5,
     Commodities = 6,
     Currencies = 7,
-    Bonds = 8
+    Bonds = 8,
+    MarketMovingNews = 9
 }

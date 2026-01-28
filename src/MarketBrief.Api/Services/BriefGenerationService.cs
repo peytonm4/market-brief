@@ -1,9 +1,13 @@
 using System.Text.Json;
+using MarketBrief.Api.Configuration;
+using MarketBrief.Api.Services.News;
 using MarketBrief.Core.Entities;
 using MarketBrief.Core.Enums;
 using MarketBrief.Infrastructure.Data;
 using MarketBrief.Infrastructure.External;
+using MarketBrief.Infrastructure.External.Gdelt;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace MarketBrief.Api.Services;
 
@@ -16,6 +20,11 @@ public class BriefGenerationService : IBriefGenerationService
     private readonly IEmailNotificationService _emailService;
     private readonly IConfiguration _configuration;
     private readonly ILogger<BriefGenerationService> _logger;
+    private readonly IGdeltNewsClient _gdeltClient;
+    private readonly INewsImpactCalculator _impactCalculator;
+    private readonly INewsDeduplicationService _deduplicationService;
+    private readonly INewsRankingService _rankingService;
+    private readonly GdeltOptions _gdeltOptions;
 
     private static GenerationLog? _currentGeneration;
     private static readonly object _lock = new();
@@ -27,7 +36,12 @@ public class BriefGenerationService : IBriefGenerationService
         IPdfGenerator pdfGenerator,
         IEmailNotificationService emailService,
         IConfiguration configuration,
-        ILogger<BriefGenerationService> logger)
+        ILogger<BriefGenerationService> logger,
+        IGdeltNewsClient gdeltClient,
+        INewsImpactCalculator impactCalculator,
+        INewsDeduplicationService deduplicationService,
+        INewsRankingService rankingService,
+        IOptions<GdeltOptions> gdeltOptions)
     {
         _dbContext = dbContext;
         _marketDataClient = marketDataClient;
@@ -36,6 +50,11 @@ public class BriefGenerationService : IBriefGenerationService
         _emailService = emailService;
         _configuration = configuration;
         _logger = logger;
+        _gdeltClient = gdeltClient;
+        _impactCalculator = impactCalculator;
+        _deduplicationService = deduplicationService;
+        _rankingService = rankingService;
+        _gdeltOptions = gdeltOptions.Value;
     }
 
     public async Task<MarketBriefEntity> GenerateBriefAsync(DateOnly date, TriggerType triggerType, CancellationToken cancellationToken = default)
@@ -118,18 +137,21 @@ public class BriefGenerationService : IBriefGenerationService
             }
             await _dbContext.SaveChangesAsync(cancellationToken);
 
+            // Fetch and process news (with graceful degradation)
+            var rankedNews = await FetchAndProcessNewsAsync(brief.Id, cancellationToken);
+
             // Generate markdown content
             _logger.LogInformation("Generating markdown content");
             brief.Summary = GenerateSummary(marketDataList);
-            brief.ContentMarkdown = _markdownGenerator.GenerateFullBrief(brief, marketDataList);
-            brief.ContentJson = JsonSerializer.Serialize(CreateContentJson(brief, marketDataList));
+            brief.ContentMarkdown = _markdownGenerator.GenerateFullBrief(brief, marketDataList, rankedNews);
+            brief.ContentJson = JsonSerializer.Serialize(CreateContentJson(brief, marketDataList, rankedNews));
 
             // Create sections
-            await CreateSectionsAsync(brief, marketDataList, cancellationToken);
+            await CreateSectionsAsync(brief, marketDataList, rankedNews, cancellationToken);
 
             // Generate PDF
             _logger.LogInformation("Generating PDF");
-            var pdfPath = await _pdfGenerator.GenerateAndSavePdfAsync(brief, marketDataList, cancellationToken);
+            var pdfPath = await _pdfGenerator.GenerateAndSavePdfAsync(brief, marketDataList, rankedNews, cancellationToken);
             brief.PdfStoragePath = pdfPath;
             brief.PdfGeneratedAt = DateTime.UtcNow;
 
@@ -198,7 +220,33 @@ public class BriefGenerationService : IBriefGenerationService
             .Where(s => s.SnapshotDate == brief.BriefDate)
             .ToListAsync(cancellationToken);
 
-        var pdfPath = await _pdfGenerator.GenerateAndSavePdfAsync(brief, marketData, cancellationToken);
+        // Try to get existing news clusters for this brief
+        var newsClusters = await _dbContext.NewsStoryClusters
+            .Where(c => c.BriefId == briefId)
+            .OrderBy(c => c.DisplayOrder)
+            .ToListAsync(cancellationToken);
+
+        IEnumerable<RankedNewsStory>? rankedNews = null;
+        if (newsClusters.Any())
+        {
+            rankedNews = newsClusters.Select(c => new RankedNewsStory(
+                Headline: c.PrimaryHeadline,
+                Url: string.Empty,
+                SourceDomain: string.Empty,
+                PublishedAt: c.CreatedAt,
+                BucketName: c.QueryBucketName,
+                BucketDisplayName: GetBucketDisplayName(c.QueryBucketName),
+                ImpactScore: c.ImpactScore,
+                PickupScore: c.PickupScore,
+                RecencyScore: c.RecencyScore,
+                RelevanceScore: c.RelevanceScore,
+                FinalScore: c.FinalScore,
+                ArticleCount: c.ArticleCount,
+                TopSources: DeserializeSources(c.RepresentativeSourcesJson)
+            ));
+        }
+
+        var pdfPath = await _pdfGenerator.GenerateAndSavePdfAsync(brief, marketData, rankedNews, cancellationToken);
 
         brief.PdfStoragePath = pdfPath;
         brief.PdfGeneratedAt = DateTime.UtcNow;
@@ -207,6 +255,35 @@ public class BriefGenerationService : IBriefGenerationService
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         return pdfPath;
+    }
+
+    private static string GetBucketDisplayName(string bucketName)
+    {
+        return bucketName switch
+        {
+            "macro_rates" => "Macro/Rates",
+            "risk_volatility" => "Risk/Volatility",
+            "oil_energy" => "Oil/Energy",
+            "megacap_ai" => "Mega-cap/AI",
+            "banks_credit" => "Banks/Credit",
+            "crypto" => "Crypto",
+            _ => bucketName
+        };
+    }
+
+    private static IReadOnlyList<string> DeserializeSources(string? json)
+    {
+        if (string.IsNullOrEmpty(json))
+            return Array.Empty<string>();
+
+        try
+        {
+            return JsonSerializer.Deserialize<List<string>>(json) ?? new List<string>();
+        }
+        catch
+        {
+            return Array.Empty<string>();
+        }
     }
 
     public bool IsGenerationRunning()
@@ -245,7 +322,7 @@ public class BriefGenerationService : IBriefGenerationService
                $"{topSector} led sector performance while {bottomSector} lagged.";
     }
 
-    private async Task CreateSectionsAsync(MarketBriefEntity brief, List<MarketDataSnapshot> marketData, CancellationToken cancellationToken)
+    private async Task CreateSectionsAsync(MarketBriefEntity brief, List<MarketDataSnapshot> marketData, IEnumerable<RankedNewsStory>? rankedNews, CancellationToken cancellationToken)
     {
         // Remove existing sections
         var existingSections = await _dbContext.BriefSections
@@ -316,11 +393,28 @@ public class BriefGenerationService : IBriefGenerationService
             });
         }
 
+        // Market-Moving News Section
+        var newsList = rankedNews?.ToList();
+        if (newsList != null && newsList.Any())
+        {
+            _dbContext.BriefSections.Add(new BriefSection
+            {
+                Id = Guid.NewGuid(),
+                BriefId = brief.Id,
+                SectionType = SectionType.MarketMovingNews,
+                Title = "Market-Moving News",
+                ContentMarkdown = _markdownGenerator.GenerateNewsSection(newsList),
+                DisplayOrder = displayOrder++
+            });
+        }
+
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    private object CreateContentJson(MarketBriefEntity brief, List<MarketDataSnapshot> marketData)
+    private object CreateContentJson(MarketBriefEntity brief, List<MarketDataSnapshot> marketData, IEnumerable<RankedNewsStory>? rankedNews = null)
     {
+        var newsList = rankedNews?.ToList();
+
         return new
         {
             title = brief.Title,
@@ -354,7 +448,128 @@ public class BriefGenerationService : IBriefGenerationService
                 name = d.Name,
                 rate = d.ClosePrice,
                 changePercent = d.ChangePercent
+            }),
+            news = newsList?.Select(n => new
+            {
+                headline = n.Headline,
+                url = n.Url,
+                source = n.SourceDomain,
+                publishedAt = n.PublishedAt,
+                bucket = n.BucketName,
+                bucketDisplayName = n.BucketDisplayName,
+                articleCount = n.ArticleCount,
+                score = n.FinalScore,
+                topSources = n.TopSources
             })
+        };
+    }
+
+    private async Task<IEnumerable<RankedNewsStory>?> FetchAndProcessNewsAsync(Guid briefId, CancellationToken cancellationToken)
+    {
+        if (!_gdeltOptions.Enabled)
+        {
+            _logger.LogInformation("GDELT news integration is disabled");
+            return null;
+        }
+
+        try
+        {
+            _logger.LogInformation("Fetching news from GDELT for {BucketCount} query buckets", _gdeltOptions.Buckets.Count);
+
+            var buckets = _gdeltOptions.Buckets.Select(b => new QueryBucket(b.Name, b.Query, b.DisplayName));
+
+            var bucketResults = await _gdeltClient.FetchAllBucketsAsync(
+                buckets,
+                _gdeltOptions.MaxRecordsPerQuery,
+                _gdeltOptions.DelayBetweenRequestsMs,
+                cancellationToken);
+
+            var bucketResultsList = bucketResults.ToList();
+
+            // Calculate impact scores for each bucket
+            var impactScores = new Dictionary<string, decimal>();
+            var allClusters = new List<NewsCluster>();
+
+            foreach (var result in bucketResultsList)
+            {
+                var impactScore = _impactCalculator.CalculateImpactScore(result.VolumeTimeline);
+                impactScores[result.BucketName] = impactScore;
+
+                _logger.LogDebug("Bucket '{Bucket}' impact score: {Score}", result.BucketName, impactScore);
+
+                // Cluster articles within each bucket
+                var clusters = _deduplicationService.ClusterArticles(
+                    result.Articles,
+                    result.BucketName,
+                    _gdeltOptions.SimilarityThreshold);
+
+                allClusters.AddRange(clusters);
+            }
+
+            _logger.LogInformation("Created {ClusterCount} total clusters from all buckets", allClusters.Count);
+
+            // Rank all clusters
+            var rankedStories = _rankingService.RankStories(
+                allClusters,
+                impactScores,
+                _gdeltOptions.MaxStories,
+                _gdeltOptions.MinArticlesPerCluster).ToList();
+
+            _logger.LogInformation("Ranked {StoryCount} market-moving news stories", rankedStories.Count);
+
+            // Save news clusters to database
+            await SaveNewsClustersAsync(briefId, rankedStories, cancellationToken);
+
+            return rankedStories;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to fetch or process news from GDELT, continuing without news section");
+            return null;
+        }
+    }
+
+    private async Task SaveNewsClustersAsync(Guid briefId, IEnumerable<RankedNewsStory> rankedStories, CancellationToken cancellationToken)
+    {
+        var displayOrder = 0;
+
+        foreach (var story in rankedStories)
+        {
+            var cluster = new NewsStoryCluster
+            {
+                Id = Guid.NewGuid(),
+                BriefId = briefId,
+                PrimaryHeadline = story.Headline,
+                WhyItMatters = GetWhyItMatters(story.BucketName),
+                QueryBucketName = story.BucketName,
+                ImpactScore = story.ImpactScore,
+                PickupScore = story.PickupScore,
+                RecencyScore = story.RecencyScore,
+                RelevanceScore = story.RelevanceScore,
+                FinalScore = story.FinalScore,
+                DisplayOrder = displayOrder++,
+                ArticleCount = story.ArticleCount,
+                RepresentativeSourcesJson = JsonSerializer.Serialize(story.TopSources),
+                CreatedAt = DateTime.UtcNow
+            };
+
+            _dbContext.NewsStoryClusters.Add(cluster);
+        }
+
+        await _dbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    private static string GetWhyItMatters(string bucketName)
+    {
+        return bucketName switch
+        {
+            "macro_rates" => "Central bank policy and inflation data directly impact equity valuations and bond yields.",
+            "risk_volatility" => "Shifts in risk sentiment can trigger rapid portfolio rebalancing across asset classes.",
+            "oil_energy" => "Energy prices affect corporate margins and consumer spending across the economy.",
+            "megacap_ai" => "Large-cap tech movements often lead broader market direction due to index weighting.",
+            "banks_credit" => "Banking sector health reflects credit conditions and economic outlook.",
+            "crypto" => "Crypto market moves can signal shifts in risk appetite and institutional adoption trends.",
+            _ => string.Empty
         };
     }
 }

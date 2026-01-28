@@ -1,3 +1,4 @@
+using MarketBrief.Api.Services.News;
 using MarketBrief.Core.Entities;
 using MarketBrief.Core.Enums;
 using QuestPDF.Fluent;
@@ -18,9 +19,10 @@ public class QuestPdfGenerator : IPdfGenerator
         QuestPDF.Settings.License = LicenseType.Community;
     }
 
-    public byte[] GeneratePdf(MarketBriefEntity brief, IEnumerable<MarketDataSnapshot> marketData)
+    public byte[] GeneratePdf(MarketBriefEntity brief, IEnumerable<MarketDataSnapshot> marketData, IEnumerable<RankedNewsStory>? rankedNews = null)
     {
         var dataList = marketData.ToList();
+        var newsList = rankedNews?.ToList();
 
         var document = Document.Create(container =>
         {
@@ -241,6 +243,51 @@ public class QuestPdfGenerator : IPdfGenerator
                             });
                         });
                     }
+
+                    // Market-Moving News (top 5 for PDF)
+                    if (newsList != null && newsList.Any())
+                    {
+                        column.Item().Column(section =>
+                        {
+                            section.Item().Text("Market-Moving News")
+                                .FontSize(14)
+                                .Bold()
+                                .FontColor(Colors.Blue.Darken2);
+
+                            section.Item().PaddingTop(8).Column(newsColumn =>
+                            {
+                                newsColumn.Spacing(10);
+
+                                foreach (var story in newsList.Take(5))
+                                {
+                                    newsColumn.Item().BorderLeft(3).BorderColor(Colors.Blue.Darken2).PaddingLeft(8).Column(storyCol =>
+                                    {
+                                        storyCol.Item().Row(row =>
+                                        {
+                                            row.AutoItem().Background(Colors.Blue.Lighten4).Padding(2).PaddingHorizontal(6)
+                                                .Text(story.BucketDisplayName)
+                                                .FontSize(8)
+                                                .FontColor(Colors.Blue.Darken3);
+
+                                            row.RelativeItem().PaddingLeft(8).Text(story.Headline)
+                                                .FontSize(10)
+                                                .SemiBold();
+                                        });
+
+                                        storyCol.Item().PaddingTop(3).Text(text =>
+                                        {
+                                            text.Span($"{story.ArticleCount} sources | ")
+                                                .FontSize(8)
+                                                .FontColor(Colors.Grey.Darken1);
+                                            text.Span(story.SourceDomain)
+                                                .FontSize(8)
+                                                .FontColor(Colors.Grey.Darken1);
+                                        });
+                                    });
+                                }
+                            });
+                        });
+                    }
                 });
 
                 page.Footer().PaddingTop(10).Row(row =>
@@ -264,9 +311,9 @@ public class QuestPdfGenerator : IPdfGenerator
         return document.GeneratePdf();
     }
 
-    public async Task<string> GenerateAndSavePdfAsync(MarketBriefEntity brief, IEnumerable<MarketDataSnapshot> marketData, CancellationToken cancellationToken = default)
+    public async Task<string> GenerateAndSavePdfAsync(MarketBriefEntity brief, IEnumerable<MarketDataSnapshot> marketData, IEnumerable<RankedNewsStory>? rankedNews = null, CancellationToken cancellationToken = default)
     {
-        var pdfBytes = GeneratePdf(brief, marketData);
+        var pdfBytes = GeneratePdf(brief, marketData, rankedNews);
 
         var storagePath = _configuration["Storage:PdfPath"] ?? "pdfs";
         Directory.CreateDirectory(storagePath);

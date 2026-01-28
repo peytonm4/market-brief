@@ -1,4 +1,5 @@
 using System.Text;
+using MarketBrief.Api.Services.News;
 using MarketBrief.Core.Entities;
 using MarketBrief.Core.Enums;
 
@@ -6,7 +7,7 @@ namespace MarketBrief.Api.Services;
 
 public class MarkdownGenerator : IMarkdownGenerator
 {
-    public string GenerateFullBrief(MarketBriefEntity brief, IEnumerable<MarketDataSnapshot> marketData)
+    public string GenerateFullBrief(MarketBriefEntity brief, IEnumerable<MarketDataSnapshot> marketData, IEnumerable<RankedNewsStory>? rankedNews = null)
     {
         var sb = new StringBuilder();
         var dataList = marketData.ToList();
@@ -53,6 +54,13 @@ public class MarkdownGenerator : IMarkdownGenerator
         if (currencies.Any())
         {
             sb.AppendLine(GenerateCurrenciesSection(currencies));
+        }
+
+        // Market-Moving News
+        var newsList = rankedNews?.ToList();
+        if (newsList != null && newsList.Any())
+        {
+            sb.AppendLine(GenerateNewsSection(newsList));
         }
 
         // Market Outlook
@@ -208,6 +216,71 @@ public class MarkdownGenerator : IMarkdownGenerator
 
         sb.AppendLine();
         return sb.ToString();
+    }
+
+    public string GenerateNewsSection(IEnumerable<RankedNewsStory> rankedNews)
+    {
+        var sb = new StringBuilder();
+        var newsList = rankedNews.ToList();
+
+        if (!newsList.Any())
+        {
+            return string.Empty;
+        }
+
+        sb.AppendLine("## Market-Moving News");
+        sb.AppendLine();
+
+        foreach (var story in newsList)
+        {
+            sb.AppendLine($"### [{story.BucketDisplayName}] {story.Headline}");
+            sb.AppendLine();
+
+            var timeAgo = story.PublishedAt.HasValue
+                ? GetTimeAgo(story.PublishedAt.Value)
+                : "Recently";
+
+            sb.AppendLine($"*{timeAgo} | {story.ArticleCount} sources | Score: {story.FinalScore:F2}*");
+            sb.AppendLine();
+
+            var whyItMatters = GenerateWhyItMatters(story);
+            if (!string.IsNullOrEmpty(whyItMatters))
+            {
+                sb.AppendLine($"**Why it matters:** {whyItMatters}");
+                sb.AppendLine();
+            }
+
+            sb.AppendLine($"[Read more]({story.Url}) ({story.SourceDomain})");
+            sb.AppendLine();
+        }
+
+        return sb.ToString();
+    }
+
+    private static string GetTimeAgo(DateTime publishedAt)
+    {
+        var diff = DateTime.UtcNow - publishedAt;
+
+        return diff.TotalMinutes switch
+        {
+            < 60 => $"{(int)diff.TotalMinutes} min ago",
+            < 1440 => $"{(int)diff.TotalHours} hr ago",
+            _ => $"{(int)diff.TotalDays} days ago"
+        };
+    }
+
+    private static string GenerateWhyItMatters(RankedNewsStory story)
+    {
+        return story.BucketName switch
+        {
+            "macro_rates" => "Central bank policy and inflation data directly impact equity valuations and bond yields.",
+            "risk_volatility" => "Shifts in risk sentiment can trigger rapid portfolio rebalancing across asset classes.",
+            "oil_energy" => "Energy prices affect corporate margins and consumer spending across the economy.",
+            "megacap_ai" => "Large-cap tech movements often lead broader market direction due to index weighting.",
+            "banks_credit" => "Banking sector health reflects credit conditions and economic outlook.",
+            "crypto" => "Crypto market moves can signal shifts in risk appetite and institutional adoption trends.",
+            _ => string.Empty
+        };
     }
 
     private string GenerateMarketOutlook(List<MarketDataSnapshot> data)

@@ -14,6 +14,8 @@ public class MarketBriefDbContext : DbContext
     public DbSet<BriefSection> BriefSections => Set<BriefSection>();
     public DbSet<MarketDataSnapshot> MarketDataSnapshots => Set<MarketDataSnapshot>();
     public DbSet<GenerationLog> GenerationLogs => Set<GenerationLog>();
+    public DbSet<NewsArticle> NewsArticles => Set<NewsArticle>();
+    public DbSet<NewsStoryCluster> NewsStoryClusters => Set<NewsStoryCluster>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
