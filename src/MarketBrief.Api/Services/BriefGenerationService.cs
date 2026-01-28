@@ -57,7 +57,7 @@ public class BriefGenerationService : IBriefGenerationService
         _gdeltOptions = gdeltOptions.Value;
     }
 
-    public async Task<MarketBriefEntity> GenerateBriefAsync(DateOnly date, TriggerType triggerType, CancellationToken cancellationToken = default)
+    public async Task<MarketBriefEntity> GenerateBriefAsync(DateOnly date, TriggerType triggerType, bool force = false, CancellationToken cancellationToken = default)
     {
         var startTime = DateTime.UtcNow;
 
@@ -67,8 +67,33 @@ public class BriefGenerationService : IBriefGenerationService
 
         if (existingBrief != null && existingBrief.Status == BriefStatus.Completed)
         {
-            _logger.LogInformation("Brief for {Date} already exists with status Completed", date);
-            return existingBrief;
+            if (force)
+            {
+                _logger.LogInformation("Force regeneration requested for {Date}, deleting existing brief {BriefId}", date, existingBrief.Id);
+
+                // Delete related sections
+                var sections = await _dbContext.BriefSections
+                    .Where(s => s.BriefId == existingBrief.Id)
+                    .ToListAsync(cancellationToken);
+                _dbContext.BriefSections.RemoveRange(sections);
+
+                // Delete related news clusters
+                var newsClusters = await _dbContext.NewsStoryClusters
+                    .Where(c => c.BriefId == existingBrief.Id)
+                    .ToListAsync(cancellationToken);
+                _dbContext.NewsStoryClusters.RemoveRange(newsClusters);
+
+                // Delete the brief itself
+                _dbContext.MarketBriefs.Remove(existingBrief);
+                await _dbContext.SaveChangesAsync(cancellationToken);
+
+                existingBrief = null;
+            }
+            else
+            {
+                _logger.LogInformation("Brief for {Date} already exists with status Completed", date);
+                return existingBrief;
+            }
         }
 
         // Create generation log

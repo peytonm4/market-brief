@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useTriggerGeneration } from '../../hooks/useGeneration'
+import { useTriggerGeneration, useGenerationStatus } from '../../hooks/useGeneration'
 
 interface GenerationTriggerProps {
   disabled?: boolean
@@ -9,10 +9,14 @@ interface GenerationTriggerProps {
 export default function GenerationTrigger({ disabled, onSuccess }: GenerationTriggerProps) {
   const [date, setDate] = useState('')
   const triggerGeneration = useTriggerGeneration()
+  const { data: generationStatus } = useGenerationStatus()
+
+  const isRunning = generationStatus?.isRunning ?? false
+  const isLoading = triggerGeneration.isPending || isRunning
 
   const handleTrigger = () => {
     triggerGeneration.mutate(
-      date ? { date } : undefined,
+      { date: date || undefined, force: true },
       {
         onSuccess: () => {
           setDate('')
@@ -31,15 +35,16 @@ export default function GenerationTrigger({ disabled, onSuccess }: GenerationTri
         value={date}
         onChange={(e) => setDate(e.target.value)}
         max={today}
-        className="block rounded-md border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500 text-sm"
+        disabled={isLoading}
+        className="block rounded-md border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
         placeholder="Select date (optional)"
       />
       <button
         onClick={handleTrigger}
-        disabled={disabled || triggerGeneration.isPending}
+        disabled={disabled || isLoading}
         className="btn btn-primary flex items-center space-x-2"
       >
-        {triggerGeneration.isPending ? (
+        {isLoading ? (
           <>
             <svg className="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
               <circle
@@ -56,7 +61,7 @@ export default function GenerationTrigger({ disabled, onSuccess }: GenerationTri
                 d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
               />
             </svg>
-            <span>Starting...</span>
+            <span>{triggerGeneration.isPending ? 'Starting...' : 'Generating...'}</span>
           </>
         ) : (
           <>

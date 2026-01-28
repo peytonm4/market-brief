@@ -41,9 +41,10 @@ public static class GenerationEndpoints
         }
 
         var targetDate = request.Date ?? DateOnly.FromDateTime(DateTime.UtcNow);
+        var forceRegenerate = request.Force;
 
         var jobId = backgroundJobClient.Enqueue<IBriefGenerationService>(
-            service => service.GenerateBriefAsync(targetDate, TriggerType.Manual, CancellationToken.None));
+            service => service.GenerateBriefAsync(targetDate, TriggerType.Manual, forceRegenerate, CancellationToken.None));
 
         return Results.Accepted(
             $"/api/v1/generation/status",

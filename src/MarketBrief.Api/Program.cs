@@ -195,6 +195,7 @@ using (var scope = app.Services.CreateScope())
         service => service.GenerateBriefAsync(
             DateOnly.FromDateTime(DateTime.UtcNow),
             TriggerType.Scheduled,
+            false,
             CancellationToken.None),
         "0 6 * * 1-5",
         new RecurringJobOptions
